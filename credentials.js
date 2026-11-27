@@ -4,6 +4,7 @@
   const name="lc-backlog-connection-v1";
   const encoder=new TextEncoder(), decoder=new TextDecoder();
   const context=encoder.encode("lc-backlog/github/v1");
+  const entryId=mode=>mode==="excel"?"work":"active";
 
   function database() {
     return new Promise((resolve,reject)=>{
@@ -29,25 +30,25 @@
   function available() {
     return Boolean(globalThis.isSecureContext && globalThis.crypto?.subtle && globalThis.indexedDB);
   }
-  async function save(repo,token) {
+  async function save(repo,token,mode) {
     const data=encoder.encode(JSON.stringify({repo,token}));
     const key=await crypto.subtle.generateKey({name:"AES-GCM",length:256},false,["encrypt","decrypt"]);
     const iv=crypto.getRandomValues(new Uint8Array(12));
     try {
       const sealed=await crypto.subtle.encrypt({name:"AES-GCM",iv,additionalData:context},key,data);
-      await store("readwrite",table=>table.put({key,iv,sealed},"active"));
+      await store("readwrite",table=>table.put({key,iv,sealed},entryId(mode)));
     } finally { data.fill(0); }
   }
-  async function load() {
+  async function load(mode) {
     if (!available()) return null;
-    const entry=await store("readonly",table=>table.get("active"));
+    const entry=await store("readonly",table=>table.get(entryId(mode)));
     if (!entry) return null;
     const data=new Uint8Array(await crypto.subtle.decrypt({name:"AES-GCM",iv:entry.iv,additionalData:context},entry.key,entry.sealed));
     try { return JSON.parse(decoder.decode(data)); }
     finally { data.fill(0); }
   }
-  async function clear() {
-    if (available()) await store("readwrite",table=>table.delete("active"));
+  async function clear(mode) {
+    if (available()) await store("readwrite",table=>table.delete(entryId(mode)));
   }
 
   globalThis.BacklogCredentials={available,save,load,clear};

@@ -2,7 +2,10 @@
   "use strict";
   const model=globalThis.Backlog, office=globalThis.BacklogOffice, github=globalThis.BacklogGitHub;
   const credentials=globalThis.BacklogCredentials;
-  const cacheKey="lc-backlog-pilot-v1";
+  const params=new URLSearchParams(location.search);
+  const workspace=params.get("workspace")==="work"?"excel":"demo";
+  const workRepo="chukachups/lc-backlog-work-data";
+  const cacheKey=workspace==="excel"?"lc-backlog-work-v1":"lc-backlog-pilot-v1";
   const byId=id=>document.getElementById(id);
   const view=byId("view"), dialog=byId("dialog"), dialogBody=byId("dialog-body");
   const views=["deadlines","registry","gantt","report"];
@@ -10,13 +13,18 @@
   const count=(n,forms)=>n+" "+forms[plural.select(n)];
   const taskCount=n=>count(n,{one:"задача",few:"задачи",many:"задач",other:"задачи"});
   const emptySlot=data=>({data,repo:"",sha:"",dirty:false});
-  let slots={mode:"demo",demo:emptySlot(model.demo()),excel:null};
+  let slots={mode:workspace,demo:emptySlot(model.demo()),excel:workspace==="excel"?emptySlot(null):null};
   let cacheError=false, cloud=null, syncTimer, revision=0, toastTimer;
   let resuming=false, resumeAvailable=false, resumeDeferred=false, connectionMessage="";
-  let deadlineFilter=new URLSearchParams(location.search).get("show")==="done"?"done":"overdue";
+  let deadlineFilter=params.get("show")==="done"?"done":"overdue";
   let registryQuery="", registrySheet="", reportUI=null;
   const slot=()=>slots[slots.mode];
-  const state=()=>slot().data;
+  const state=()=>slot().data || {name:"Рабочий беклог",tasks:[],quarters:[],legend:{},report:null};
+  const cloudMode=()=>slots.mode===workspace;
+  const storageRepo=()=>workspace==="excel"?workRepo:params.get("repo") || "";
+  function checkRemote(data) {
+    if (data && data.kind!==workspace) throw Error("Файл из GitHub относится к другому беклогу.");
+  }
   const section=()=>views.includes(location.hash.slice(1))?location.hash.slice(1):"deadlines";
   const el=(tag,cls,text)=>{
     const node=document.createElement(tag);
@@ -41,12 +49,12 @@
       const saved=JSON.parse(localStorage.getItem(cacheKey));
       if (!saved) return;
       for (const mode of ["demo","excel"]) {
-        if (!saved[mode]) continue;
+        if (!saved[mode]?.data) continue;
         const row=saved[mode], data=model.validate(row.data);
         if (data.kind!==mode) continue;
         slots[mode]={data,repo:String(row.repo||""),sha:String(row.sha||""),dirty:row.dirty===true};
       }
-      if (saved.mode==="excel" && slots.excel) slots.mode="excel";
+      if (workspace==="demo" && saved.mode==="excel" && slots.excel) slots.mode="excel";
     } catch { cacheError=true; }
   }
   function cache() {
@@ -61,7 +69,7 @@
   }
   function changed() {
     slot().dirty=true;
-    if (slots.mode==="demo") { revision++; queueSync(); }
+    if (cloudMode()) { revision++; queueSync(); }
     cache();
   }
   function download(blob,name) {
@@ -82,9 +90,10 @@
       try {
         if (file.size>12000000) throw Error("Копия беклога слишком большая.");
         const data=model.validate(JSON.parse(await file.text()));
+        if (workspace==="excel" && data.kind!=="excel") throw Error("Для учебной копии откройте учебный беклог.");
         if (!confirm("Заменить локальную копию выбранным файлом?")) return;
         if (cloud?.busy) throw Error("Дождитесь завершения синхронизации и попробуйте снова.");
-        if (data.kind==="demo") {cloud?.client.close();cloud=null;clearTimeout(syncTimer);revision++;}
+        if (data.kind===workspace) {cloud?.client.close();cloud=null;clearTimeout(syncTimer);revision++;}
         slots[data.kind]=emptySlot(data); slots[data.kind].dirty=true;
         slots.mode=data.kind; reportUI=null;
         dialog.close();cache();render();notify("Копия открыта в браузере");
@@ -95,29 +104,30 @@
     if (mode===slots.mode) return;
     slots.mode=mode; reportUI=null; registryQuery=""; registrySheet="";
     cache(); render();
-    if (mode==="demo") {
+    if (cloudMode()) {
       if (cloud) queueSync();
       else resumeConnection();
     }
   }
   function paintStatus() {
     const control=byId("connect");
-    const online=Boolean(cloud?.ready)&&slots.mode==="demo";
+    const online=Boolean(cloud?.ready)&&cloudMode();
     control.classList.toggle("connected",online && !cloud.error);
-    control.disabled=slots.mode==="demo"&&resuming;
-    byId("connect-caption").textContent=slots.mode==="excel"?"Локальная книга Excel":resuming?"Подключение…":cloud?.busy?"Синхронизация…":
-      cloud?.error?"Проверить синхронизацию":online?(slots.demo.dirty?"Есть изменения":"GitHub подключён"):
+    control.disabled=cloudMode()&&resuming;
+    byId("connect-caption").textContent=!cloudMode()?"Локальная книга Excel":resuming?"Подключение…":cloud?.busy?"Синхронизация…":
+      cloud?.error?"Проверить синхронизацию":online?(slots[workspace].dirty?"Есть изменения":"GitHub подключён"):
       cloud?"Настроить хранилище":resumeAvailable?"Переподключить GitHub":"Подключить GitHub";
     const source=byId("source");
     source.replaceChildren(el("span",null,state().name+(cacheError?" · браузер не сохранил копию":"")));
-    if (slots.excel) source.append(document.createTextNode(" · "),
+    if (workspace==="demo" && slots.excel) source.append(document.createTextNode(" · "),
       button(slots.mode==="excel"?"Учебные данные":"Локальная книга","link-button",
         ()=>switchMode(slots.mode==="excel"?"demo":"excel")));
   }
   const stagedReport=()=>reportUI?.dirty;
   function attachCloud(client,remote) {
-    if (remote.data && remote.data.kind!=="demo") throw Error("Для облачного пилота используйте вымышленные данные.");
-    const local=slots.demo;
+    checkRemote(remote.data);
+    if (workspace==="excel" && !remote.data) throw Error("В рабочем репозитории отсутствует файл беклога.");
+    const local=slots[workspace];
     const conflict=Boolean(remote.data && local.dirty && (local.repo!==client.key || local.sha!==remote.sha));
     cloud={client,ready:Boolean(remote.data),busy:false,conflict,
       error:conflict?"В браузере и на GitHub есть разные правки. Скачайте копию перед загрузкой данных GitHub.":""};
@@ -127,23 +137,23 @@
     }
   }
   async function clearRemembered() {
-    await credentials.clear();
+    await credentials.clear(workspace);
     resumeAvailable=false;
   }
   async function resumeConnection() {
-    if (cloud || resuming || slots.mode!=="demo" || !credentials.available()) return;
+    if (cloud || resuming || !cloudMode() || !credentials.available()) return;
     resuming=true;connectionMessage="";paintStatus();
     let client;
     try {
-      const saved=await credentials.load();
+      const saved=await credentials.load(workspace);
       resumeAvailable=Boolean(saved);
-      if (!saved || slots.mode!=="demo") return;
-      const requested=new URLSearchParams(location.search).get("repo");
+      if (!saved || !cloudMode()) return;
+      const requested=storageRepo();
       if (requested && requested.toLowerCase()!==saved.repo.toLowerCase()) return;
       client=github.connect(saved.repo,saved.token);
       await client.verify();
       const remote=await client.read();
-      if (slots.mode!=="demo") return;
+      if (!cloudMode()) return;
       if (dialog.open) { resumeDeferred=true;return; }
       attachCloud(client,remote);client=null;
       cache();render();queueSync();
@@ -159,13 +169,13 @@
   }
   function queueSync() {
     clearTimeout(syncTimer);
-    if (slots.mode==="demo" && cloud?.ready && !cloud.conflict && slots.demo.dirty)
+    if (cloudMode() && cloud?.ready && !cloud.conflict && slots[workspace].dirty)
       syncTimer=setTimeout(()=>sync(false),800);
   }
   async function sync(pull) {
     const connection=cloud;
-    if (slots.mode!=="demo" || !connection?.ready || connection.busy || connection.conflict) return;
-    const local=slots.demo, before=revision;
+    if (!cloudMode() || !connection?.ready || connection.busy || connection.conflict) return;
+    const local=slots[workspace], before=revision;
     if (!local.dirty && (!pull || dialog.open || stagedReport())) return;
     connection.busy=true; connection.error=""; paintStatus();
     let success=false;
@@ -176,10 +186,10 @@
       } else {
         const remote=await connection.client.read();
         if (!remote.data) throw Error("Файл беклога исчез из репозитория. Проверьте подключение.");
-        if (remote.data.kind!=="demo") throw Error("Для облачного пилота используйте вымышленные данные.");
+        checkRemote(remote.data);
         if (remote.sha!==local.sha && before===revision && !local.dirty && !dialog.open && !stagedReport()) {
           local.sha=remote.sha; local.data=remote.data; reportUI=null;
-          if (slots.mode==="demo") render();
+          if (cloudMode()) render();
         }
       }
       success=true;
@@ -206,18 +216,18 @@
     if (resumeDeferred) { resumeDeferred=false;resumeConnection(); }
   });
   function cloudPanel() {
-    if (resuming && slots.mode==="demo") return;
+    if (resuming && cloudMode()) return;
     const panel=el("div","form-grid");
-    if (slots.mode==="excel") {
+    if (!cloudMode()) {
       panel.append(el("p","context-box","Книга Excel открыта локально. Синхронизация в пилоте доступна в учебном беклоге."),
         button("Открыть учебный беклог","primary",()=>{dialog.close();switchMode("demo");}));
       restoreControl(panel);
       openDialog("Хранилище GitHub",panel); return;
     }
     if (!cloud) {
-      const requestedRepo=new URLSearchParams(location.search).get("repo") || "";
-      const repo=input("text","Закрытый репозиторий",slots.demo.repo || requestedRepo.slice(0,140));
+      const repo=input("text","Закрытый репозиторий",workspace==="excel"?workRepo:slots.demo.repo || storageRepo().slice(0,140));
       repo.placeholder="владелец/репозиторий";
+      repo.readOnly=workspace==="excel";
       const token=input("password","Fine-grained токен"); token.autocomplete="off";
       const remember=input("checkbox","Запомнить на этом устройстве");
       remember.checked=credentials.available();
@@ -231,7 +241,7 @@
         let accessKey=token.value;
         connect.disabled=true; error.textContent="";
         try {
-          client=github.connect(repo.value,accessKey);token.value="";
+          client=github.connect(workspace==="excel"?workRepo:repo.value,accessKey);token.value="";
           await client.verify();
           const remote=await client.read();
           if (!dialog.open || !dialogBody.contains(panel)) return;
@@ -240,7 +250,7 @@
           let notice="Беклог подключён к GitHub";
           try {
             if (remember.checked) {
-              await credentials.save(client.name,accessKey.trim());
+              await credentials.save(client.name,accessKey.trim(),workspace);
               resumeAvailable=true;
             } else if (resumeAvailable) await clearRemembered();
           } catch { notice="GitHub подключён. Браузер не смог запомнить ключ."; }
@@ -271,7 +281,7 @@
         const create=button("Сохранить учебный беклог на GitHub","primary",async()=>{
           create.disabled=true; connection.busy=true; paintStatus();
           try {
-            const local=slots.demo, before=revision;
+            const local=slots[workspace], before=revision;
             local.sha=await connection.client.write(model.copy(local.data),"");
             local.repo=connection.client.key;
             if (before===revision) local.dirty=false;
@@ -284,20 +294,21 @@
         });
         actions.appendChild(create);
       } else if (connection.conflict) {
-        actions.append(button("Скачать локальную копию","secondary",()=>downloadBackup(slots.demo.data)),
+        actions.append(button("Скачать локальную копию","secondary",()=>downloadBackup(slots[workspace].data)),
           button("Загрузить версию GitHub","primary",async()=>{
-            if (!confirm("Заменить учебную копию в браузере версией GitHub? Сохраните свою копию перед заменой.")) return;
+            if (!confirm("Заменить копию в браузере версией GitHub? Сохраните свою копию перед заменой.")) return;
             try {
               const remote=await connection.client.read();
-              if (!remote.data || remote.data.kind!=="demo") throw Error("На GitHub не найдена учебная версия.");
-              slots.demo={data:remote.data,repo:connection.client.key,sha:remote.sha,dirty:false};
+              if (!remote.data) throw Error("На GitHub не найден файл беклога.");
+              checkRemote(remote.data);
+              slots[workspace]={data:remote.data,repo:connection.client.key,sha:remote.sha,dirty:false};
               connection.conflict=false; connection.error=""; revision++; reportUI=null;
               dialog.close(); cache(); render(); notify("Загружена свежая версия GitHub");
             } catch (exc) { error.textContent=exc.message; }
           }));
       } else {
         actions.append(button("Синхронизировать","primary",()=>{ dialog.close(); sync(true); }),
-          button("Скачать копию","secondary",()=>downloadBackup(slots.demo.data)));
+          button("Скачать копию","secondary",()=>downloadBackup(slots[workspace].data)));
       }
       actions.appendChild(button("Отключить","secondary",async()=>{
         if (connection.busy) return;
@@ -551,6 +562,7 @@
   }
 
   const workbook=byId("workbook-file");
+  byId("import").hidden=workspace==="excel";
   byId("import").onclick=()=>workbook.click();
   workbook.onchange=async()=>{
     const file=workbook.files[0]; workbook.value="";
@@ -585,6 +597,13 @@
       if (a.dataset.view===page) a.setAttribute("aria-current","page");else a.removeAttribute("aria-current");
     });
     view.replaceChildren();
+    byId("export").disabled=!slot().data;
+    if (!slot().data) {
+      heading("Рабочий беклог");
+      const panel=el("div","panel empty");
+      panel.append(el("p",null,"Подключите рабочий репозиторий GitHub, чтобы открыть задачи."));
+      view.appendChild(panel);paintStatus();return;
+    }
     if (page==="registry") registry();
     else if (page==="gantt") gantt();
     else if (page==="report") reportView();
