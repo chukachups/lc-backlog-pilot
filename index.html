@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src https://api.github.com; base-uri 'none'; form-action 'none'">
+  <title>Беклог ЛЦ</title>
+  <link rel="stylesheet" href="./styles.css">
+  <script defer src="./model.js"></script>
+  <script defer src="./office.js"></script>
+  <script defer src="./github.js"></script>
+  <script defer src="./app.js"></script>
+</head>
+<body>
+  <aside class="sidebar">
+    <a class="brand" href="#deadlines"><span class="brand-mark" aria-hidden="true"></span>Беклог ЛЦ</a>
+    <nav aria-label="Разделы беклога">
+      <a href="#deadlines" data-view="deadlines">Сроки</a>
+      <a href="#registry" data-view="registry">Реестр задач</a>
+      <a href="#gantt" data-view="gantt">Гант</a>
+      <a href="#report" data-view="report">Отчёт</a>
+    </nav>
+    <button id="connect" class="connection" type="button"><span class="indicator" aria-hidden="true"></span><span id="connect-caption">Подключить GitHub</span></button>
+  </aside>
+  <main class="main">
+    <header class="topline">
+      <span id="source"></span>
+      <div class="actions">
+        <button type="button" class="secondary" id="import">Импорт Excel</button>
+        <button type="button" class="primary" id="export">Выгрузить Excel</button>
+        <input id="workbook-file" type="file" accept=".xlsx" hidden>
+      </div>
+    </header>
+    <section id="view" class="view" aria-label="Рабочая область"></section>
+  </main>
+  <dialog id="dialog" aria-labelledby="dialog-title">
+    <div class="dialog-header">
+      <h2 id="dialog-title"></h2>
+      <button id="close-dialog" class="secondary" type="button">Закрыть</button>
+    </div>
+    <div id="dialog-body"></div>
+  </dialog>
+  <div id="toast" class="toast" role="status" hidden></div>
+</body>
+</html>
