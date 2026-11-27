@@ -62,11 +62,12 @@ h3 { font-size: 1rem; }
 .filter[aria-pressed="true"] .filter-count { color: var(--accent); background: var(--accent-soft); }
 .filter.danger .filter-count, .date-badge.danger { color: var(--danger); }
 .date-badge.amber { color: var(--warning); }
-.deadline { display: grid; grid-template-columns: 19px minmax(0, 1.5fr) minmax(0, 1fr) 98px; gap: 12px; align-items: center; padding: 11px 14px; border-bottom: 1px solid var(--line); }
+.deadline { display: grid; grid-template-columns: 19px minmax(0, 1.5fr) minmax(0, 1fr) 128px; gap: 12px; align-items: center; padding: 11px 14px; border-bottom: 1px solid var(--line); }
 .deadline:last-child { border-bottom: 0; }
 .deadline-head { color: var(--muted); background: #f8f9fb; font-size: .875rem; font-weight: 650; padding-top: 7px; padding-bottom: 7px; }
 .deadline-step, .deadline-task { overflow-wrap: anywhere; }
 .deadline-step { font-weight: 600; }
+.done-mark { font-weight: 700; color: var(--good); text-align: center; }
 .link-button { text-align: left; border: 0; background: none; color: var(--accent); padding: 0; font-weight: 620; }
 .link-button:hover { text-decoration: underline; }
 .date-badge { font-variant-numeric: tabular-nums; white-space: nowrap; color: var(--muted); font-size: .875rem; }
@@ -79,6 +80,7 @@ h3 { font-size: 1rem; }
 .table tbody tr:hover { background: #f9fafc; }
 .registry { min-width: 620px; }
 .registry th:first-child { width: 51%; }
+.registry .registry-completed { display: block; margin-top: 3px; font-size: .875rem; }
 .gantt { min-width: 740px; }
 .gantt th:not(:first-child), .gantt td:not(:first-child) { text-align: center; white-space: nowrap; }
 .gantt th:first-child { min-width: 210px; }
@@ -137,10 +139,10 @@ dialog::backdrop { background: #17223566; }
 }
 @media (max-width: 530px) {
   .topline { align-items: flex-start; flex-direction: column; }
-  .deadline-filters { padding: 0 9px; gap: 9px; }
+  .deadline-filters { padding: 0 9px; gap: 0 9px; flex-wrap: wrap; }
   .deadline { grid-template-columns: 17px minmax(0, 1fr) auto; gap: 2px 9px; padding: 10px 11px; }
   .deadline-head { display: none; }
-  .deadline input { grid-row: 1 / span 2; }
+  .deadline input, .deadline .done-mark { grid-row: 1 / span 2; }
   .deadline-step { grid-column: 2; grid-row: 1; }
   .deadline-task { grid-column: 2; grid-row: 2; font-size: .875rem; }
   .deadline-date { grid-column: 3; grid-row: 1 / span 2; }

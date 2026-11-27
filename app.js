@@ -13,7 +13,8 @@
   let slots={mode:"demo",demo:emptySlot(model.demo()),excel:null};
   let cacheError=false, cloud=null, syncTimer, revision=0, toastTimer;
   let resuming=false, resumeAvailable=false, resumeDeferred=false, connectionMessage="";
-  let deadlineFilter="overdue", registryQuery="", registrySheet="", reportUI=null;
+  let deadlineFilter=new URLSearchParams(location.search).get("show")==="done"?"done":"overdue";
+  let registryQuery="", registrySheet="", reportUI=null;
   const slot=()=>slots[slots.mode];
   const state=()=>slot().data;
   const section=()=>views.includes(location.hash.slice(1))?location.hash.slice(1):"deadlines";
@@ -318,36 +319,49 @@
     if (detail) text.appendChild(el("p","muted small",detail));
     top.appendChild(text); view.appendChild(top);
   }
-  const deadlineNames={overdue:["Просрочено","danger"],today:["Сегодня","amber"],week:["Ближайшие 7 дней","good"],none:["Без срока",""]};
+  const deadlineNames={overdue:["Просрочено","danger"],today:["Сегодня","amber"],week:["Ближайшие 7 дней","good"],
+    none:["Без срока",""],done:["Выполнено","good"]};
   function deadlines() {
     heading("Сроки",model.dateLabel(model.today()));
-    const groups={overdue:[],today:[],week:[],none:[]};
+    const groups={overdue:[],today:[],week:[],none:[],done:[]};
     state().tasks.forEach(task=>task.steps.forEach(step=>{
-      const key=model.deadlineGroup(step);
+      const key=step.done?"done":model.deadlineGroup(step);
       if (groups[key]) groups[key].push({task,step});
     }));
+    const completed=deadlineFilter==="done";
     const panel=el("section","panel"), counts=el("div","filters deadline-filters"), list=el("div","step-list");
-    counts.setAttribute("aria-label","Фильтр по сроку");
+    counts.setAttribute("aria-label","Фильтр шагов");
     Object.entries(deadlineNames).forEach(([key,[label,tone]])=>{
       const tile=button("","filter "+tone,()=>{deadlineFilter=key;render();});
       tile.setAttribute("aria-pressed",String(deadlineFilter===key));
       tile.append(el("span",null,label),el("span","filter-count",groups[key].length));
       counts.appendChild(tile);
     });
-    const rows=groups[deadlineFilter].slice().sort((a,b)=>a.step.due.localeCompare(b.step.due));
-    if (!rows.length) list.appendChild(el("p","empty","В этой группе шагов нет."));
+    const rows=groups[deadlineFilter].slice().sort((a,b)=>completed?
+      b.step.completedOn.localeCompare(a.step.completedOn):a.step.due.localeCompare(b.step.due));
+    if (!rows.length) list.appendChild(el("p","empty",completed?"Выполненных шагов пока нет.":"В этой группе шагов нет."));
     if (rows.length) {
       const header=el("div","deadline deadline-head");
-      header.append(el("span"),el("span",null,"Шаг"),el("span",null,"Задача"),el("span",null,"Срок"));
+      header.append(el("span"),el("span",null,"Шаг"),el("span",null,"Задача"),el("span",null,completed?"Дата выполнения":"Срок"));
       list.appendChild(header);
     }
     for (const {task,step} of rows) {
-      const row=el("div","deadline"), toggle=input("checkbox","Выполнить "+step.text);
-      toggle.onchange=()=>{step.done=true;step.completedOn=model.today();changed();render();notify("Шаг отмечен выполненным");};
-      const taskLink=button(task.title,"link-button deadline-task",()=>taskDialog(task.id));
+      const row=el("div","deadline");
+      if (completed) {
+        const mark=el("span","done-mark","✓");
+        mark.setAttribute("aria-label","Выполнено");
+        row.appendChild(mark);
+      } else {
+        const toggle=input("checkbox","Выполнить "+step.text);
+        toggle.onchange=()=>{step.done=true;step.completedOn=model.today();changed();render();notify("Шаг отмечен выполненным");};
+        row.appendChild(toggle);
+      }
+      const taskLink=button(task.title,"link-button deadline-task",()=>taskDialog(task.id,completed?"done":"all"));
       taskLink.title=task.code+" · "+task.title;
-      row.append(toggle,el("p","deadline-step",step.text),taskLink,
-        el("span","date-badge deadline-date "+deadlineNames[deadlineFilter][1],step.due?model.dateLabel(step.due):"—"));
+      const date=completed?step.completedOn:step.due;
+      const dateCell=el("span","date-badge deadline-date "+deadlineNames[deadlineFilter][1],date?model.dateLabel(date):"—");
+      if (completed && !date) dateCell.title="Дата выполнения не указана";
+      row.append(el("p","deadline-step",step.text),taskLink,dateCell);
       list.appendChild(row);
     }
     panel.append(counts,list);view.appendChild(panel);
@@ -374,14 +388,16 @@
         model.normalize([task.title,task.code,task.jira,task.owner].join(" ")).includes(model.normalize(registryQuery)));
       results.replaceChildren();
       if (!tasks.length) { results.appendChild(el("p","empty","Задачи по фильтру не найдены.")); return; }
-      const [grid,body]=table(["Задача","Исполнитель","Статус","Шаги"],"registry");
+      const [grid,body]=table(["Задача","Исполнитель","Статус"],"registry");
       for (const task of tasks) {
         const tr=body.insertRow();
+        const done=task.steps.filter(step=>step.done).length;
+        const doneLink=button("Выполнено "+done+" из "+task.steps.length,"link-button registry-completed",()=>taskDialog(task.id,"done"));
+        doneLink.setAttribute("aria-label","Выполнено "+done+" из "+task.steps.length+" · "+task.title);
         tr.insertCell().append(el("div","muted small",task.code+(task.jira && task.jira!=="—"?" · "+task.jira:"")),
-          button(task.title,"link-button",()=>taskDialog(task.id)));
+          button(task.title,"link-button",()=>taskDialog(task.id)),doneLink);
         tr.insertCell().textContent=task.owner||"—";
         tr.insertCell().appendChild(el("span","tag",task.status||"—"));
-        tr.insertCell().textContent=task.steps.filter(step=>step.done).length+" / "+task.steps.length;
       }
       results.appendChild(grid);
     }
@@ -405,12 +421,12 @@
     });
     wrap.appendChild(grid);panel.append(legend,wrap);view.appendChild(panel);
   }
-  function taskDialog(id) {
+  function taskDialog(id,initialFilter="all") {
     const current=state().tasks.find(task=>task.id===id);
     if (!current) return;
     const draft=model.copy(current), panel=el("div","form-grid"), filters=el("div","filters task-filters"),
       steps=el("div","task-steps"), error=el("p","form-error");
-    let filter="all";
+    let filter=initialFilter;
     const result=getTextArea("Результат для руководства",draft.result);
     result.placeholder="Что проверили и какой результат получили";
     result.maxLength=12000;
@@ -446,7 +462,8 @@
         const group=el("section","step-section");
         if (filter==="all") group.appendChild(el("h3",null,title));
         draft.steps.forEach((step,i)=>{ if (step.done===done) renderStep(step,i,group); });
-        if (!draft.steps.some(step=>step.done===done)) group.appendChild(el("p","muted small","Шагов пока нет."));
+        if (!draft.steps.some(step=>step.done===done))
+          group.appendChild(el("p","muted small",done?"Выполненных шагов пока нет.":"Открытых шагов пока нет."));
         steps.appendChild(group);
       }
       if (focusId) {
