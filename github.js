@@ -10,6 +10,9 @@
   class Conflict extends Error {
     constructor() { super("На GitHub уже есть более свежая версия. Локальные правки сохранены в этом браузере."); }
   }
+  class AuthenticationError extends Error {
+    constructor() { super("GitHub отклонил ключ. Проверьте срок его действия и подключитесь заново."); }
+  }
   function repository(value) {
     const name=value.trim();
     if (!/^[a-zA-Z0-9][a-zA-Z0-9-]{0,38}\/[a-zA-Z0-9_.-]{1,100}$/.test(name) ||
@@ -24,7 +27,7 @@
 
     async function request(path, options={}) {
       try {
-        return await fetch(root+path,{cache:"no-store",redirect:"error",referrerPolicy:"no-referrer",
+        return await fetch(root+path,{cache:"no-store",redirect:"error",referrerPolicy:"no-referrer",signal:AbortSignal.timeout(12000),
           ...options,headers:{Accept:"application/vnd.github+json",Authorization:"Bearer "+token,
             ...(options.body?{"Content-Type":"application/json"}:{})}});
       } catch {
@@ -32,7 +35,7 @@
       }
     }
     function failure(response, action) {
-      if (response.status===401) return Error("GitHub отклонил ключ. Проверьте срок действия токена.");
+      if (response.status===401) return new AuthenticationError();
       if ([403,404].includes(response.status)) return Error("Нет доступа к закрытому репозиторию. Проверьте имя репозитория и разрешение Contents: Read and write.");
       if (response.status===429) return Error("Достигнут лимит запросов GitHub. Повторите синхронизацию позже.");
       return Error(action+" не удалось (GitHub "+response.status+").");
@@ -76,5 +79,5 @@
     }
     return {name,key:name.toLowerCase(),verify,read,write,close:()=>{ token=""; }};
   }
-  globalThis.BacklogGitHub={connect,Conflict};
+  globalThis.BacklogGitHub={connect,Conflict,AuthenticationError};
 })();

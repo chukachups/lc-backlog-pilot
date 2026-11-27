@@ -1,17 +1,18 @@
 (() => {
   "use strict";
   const model=globalThis.Backlog, office=globalThis.BacklogOffice, github=globalThis.BacklogGitHub;
+  const credentials=globalThis.BacklogCredentials;
   const cacheKey="lc-backlog-pilot-v1";
   const byId=id=>document.getElementById(id);
   const view=byId("view"), dialog=byId("dialog"), dialogBody=byId("dialog-body");
   const views=["deadlines","registry","gantt","report"];
   const plural=new Intl.PluralRules("ru");
   const count=(n,forms)=>n+" "+forms[plural.select(n)];
-  const stepCount=n=>count(n,{one:"шаг",few:"шага",many:"шагов",other:"шага"});
   const taskCount=n=>count(n,{one:"задача",few:"задачи",many:"задач",other:"задачи"});
   const emptySlot=data=>({data,repo:"",sha:"",dirty:false});
   let slots={mode:"demo",demo:emptySlot(model.demo()),excel:null};
   let cacheError=false, cloud=null, syncTimer, revision=0, toastTimer;
+  let resuming=false, resumeAvailable=false, resumeDeferred=false, connectionMessage="";
   let deadlineFilter="overdue", registryQuery="", registrySheet="", reportUI=null;
   const slot=()=>slots[slots.mode];
   const state=()=>slot().data;
@@ -93,15 +94,19 @@
     if (mode===slots.mode) return;
     slots.mode=mode; reportUI=null; registryQuery=""; registrySheet="";
     cache(); render();
-    if (mode==="demo") queueSync();
+    if (mode==="demo") {
+      if (cloud) queueSync();
+      else resumeConnection();
+    }
   }
   function paintStatus() {
     const control=byId("connect");
     const online=Boolean(cloud?.ready)&&slots.mode==="demo";
     control.classList.toggle("connected",online && !cloud.error);
-    byId("connect-caption").textContent=slots.mode==="excel"?"Локальная книга Excel":cloud?.busy?"Синхронизация…":
+    control.disabled=slots.mode==="demo"&&resuming;
+    byId("connect-caption").textContent=slots.mode==="excel"?"Локальная книга Excel":resuming?"Подключение…":cloud?.busy?"Синхронизация…":
       cloud?.error?"Проверить синхронизацию":online?(slots.demo.dirty?"Есть изменения":"GitHub подключён"):
-      cloud?"Настроить хранилище":"Подключить GitHub";
+      cloud?"Настроить хранилище":resumeAvailable?"Переподключить GitHub":"Подключить GitHub";
     const source=byId("source");
     source.replaceChildren(el("span",null,state().name+(cacheError?" · браузер не сохранил копию":"")));
     if (slots.excel) source.append(document.createTextNode(" · "),
@@ -109,6 +114,48 @@
         ()=>switchMode(slots.mode==="excel"?"demo":"excel")));
   }
   const stagedReport=()=>reportUI?.dirty;
+  function attachCloud(client,remote) {
+    if (remote.data && remote.data.kind!=="demo") throw Error("Для облачного пилота используйте вымышленные данные.");
+    const local=slots.demo;
+    const conflict=Boolean(remote.data && local.dirty && (local.repo!==client.key || local.sha!==remote.sha));
+    cloud={client,ready:Boolean(remote.data),busy:false,conflict,
+      error:conflict?"В браузере и на GitHub есть разные правки. Скачайте копию перед загрузкой данных GitHub.":""};
+    if (remote.data && !conflict) {
+      if (!local.dirty) { local.data=remote.data;if (!stagedReport()) reportUI=null; }
+      local.repo=client.key;local.sha=remote.sha;
+    }
+  }
+  async function clearRemembered() {
+    await credentials.clear();
+    resumeAvailable=false;
+  }
+  async function resumeConnection() {
+    if (cloud || resuming || slots.mode!=="demo" || !credentials.available()) return;
+    resuming=true;connectionMessage="";paintStatus();
+    let client;
+    try {
+      const saved=await credentials.load();
+      resumeAvailable=Boolean(saved);
+      if (!saved || slots.mode!=="demo") return;
+      const requested=new URLSearchParams(location.search).get("repo");
+      if (requested && requested.toLowerCase()!==saved.repo.toLowerCase()) return;
+      client=github.connect(saved.repo,saved.token);
+      await client.verify();
+      const remote=await client.read();
+      if (slots.mode!=="demo") return;
+      if (dialog.open) { resumeDeferred=true;return; }
+      attachCloud(client,remote);client=null;
+      cache();render();queueSync();
+    } catch (error) {
+      connectionMessage=error.message;
+      if (error instanceof github.AuthenticationError) {
+        try { await clearRemembered(); } catch { connectionMessage+=" Браузер не смог удалить старый ключ."; }
+      }
+    } finally {
+      client?.close();
+      resuming=false;paintStatus();
+    }
+  }
   function queueSync() {
     clearTimeout(syncTimer);
     if (slots.mode==="demo" && cloud?.ready && !cloud.conflict && slots.demo.dirty)
@@ -138,6 +185,11 @@
     } catch (error) {
       connection.error=error.message;
       if (error instanceof github.Conflict) connection.conflict=true;
+      if (error instanceof github.AuthenticationError) {
+        connection.client.close();cloud=null;connectionMessage=error.message;
+        try { await clearRemembered(); } catch { connectionMessage+=" Браузер не смог удалить старый ключ."; }
+        notify(connectionMessage);
+      }
       if (pull || connection.conflict) notify(error.message);
     } finally {
       connection.busy=false; cache();
@@ -149,7 +201,11 @@
     if (!dialog.open) dialog.showModal();
   }
   byId("close-dialog").onclick=()=>dialog.close();
+  dialog.addEventListener("close",()=>{
+    if (resumeDeferred) { resumeDeferred=false;resumeConnection(); }
+  });
   function cloudPanel() {
+    if (resuming && slots.mode==="demo") return;
     const panel=el("div","form-grid");
     if (slots.mode==="excel") {
       panel.append(el("p","context-box","Книга Excel открыта локально. Синхронизация в пилоте доступна в учебном беклоге."),
@@ -162,42 +218,53 @@
       const repo=input("text","Закрытый репозиторий",slots.demo.repo || requestedRepo.slice(0,140));
       repo.placeholder="владелец/репозиторий";
       const token=input("password","Fine-grained токен"); token.autocomplete="off";
-      const error=el("p","form-error");
+      const remember=input("checkbox","Запомнить на этом устройстве");
+      remember.checked=credentials.available();
+      remember.disabled=!credentials.available();
+      const keep=el("label","checkrow remember");
+      keep.append(remember,el("span","small","Запомнить на этом устройстве"));
+      const error=el("p","form-error",connectionMessage);
       error.setAttribute("role","status");
       const connect=button("Подключиться","primary",async()=>{
         let client, connected=false;
+        let accessKey=token.value;
         connect.disabled=true; error.textContent="";
         try {
-          client=github.connect(repo.value,token.value); token.value="";
+          client=github.connect(repo.value,accessKey);token.value="";
           await client.verify();
-          const remote=await client.read(), local=slots.demo;
+          const remote=await client.read();
           if (!dialog.open || !dialogBody.contains(panel)) return;
-          if (remote.data && remote.data.kind!=="demo") throw Error("Для облачного пилота используйте вымышленные данные.");
-          const conflict=Boolean(remote.data && local.dirty && (local.repo!==client.key || local.sha!==remote.sha));
-          cloud={client,ready:Boolean(remote.data),busy:false,conflict,error:conflict?"В локальной копии и на GitHub есть разные правки. Скачайте копию перед загрузкой данных GitHub.":""};
-          if (remote.data && !conflict) {
-            if (!local.dirty) { local.data=remote.data; reportUI=null; }
-            local.repo=client.key; local.sha=remote.sha;
-          }
+          attachCloud(client,remote);
+          connectionMessage="";
+          let notice="Беклог подключён к GitHub";
+          try {
+            if (remember.checked) {
+              await credentials.save(client.name,accessKey.trim());
+              resumeAvailable=true;
+            } else if (resumeAvailable) await clearRemembered();
+          } catch { notice="GitHub подключён. Браузер не смог запомнить ключ."; }
           connected=true; cache(); render();
-          if (remote.data && !conflict) { dialog.close(); notify("Беклог подключён к GitHub"); queueSync(); }
+          if (cloud.ready && !cloud.conflict) { dialog.close(); notify(notice); queueSync(); }
           else cloudPanel();
         } catch (exception) { error.textContent=exception.message; }
-        finally { connect.disabled=false; if (!connected) client?.close(); }
+        finally { accessKey="";connect.disabled=false; if (!connected) client?.close(); }
       });
-      panel.append(el("p","muted","Подключите отдельный репозиторий Private для учебных задач."),
-        field("Владелец / репозиторий",repo),field("Fine-grained токен",token),
-        el("p","muted small","Разрешение Contents: Read and write только для этого репозитория. Токен действует в открытой вкладке."),
-        error,el("div","actions"));
+      token.onkeydown=event=>{ if (event.key==="Enter" && !connect.disabled) connect.click(); };
+      panel.append(field("Репозиторий",repo),field("Ключ доступа",token),keep,error,el("div","actions"));
       panel.lastChild.appendChild(connect);
       const keyLink=el("a","small","Создать ключ на GitHub");
       keyLink.href="https://github.com/settings/personal-access-tokens/new";
       keyLink.target="_blank";keyLink.rel="noopener noreferrer";
       panel.lastChild.appendChild(keyLink);
+      if (resumeAvailable) {
+        panel.appendChild(button("Повторить сохранённое подключение","secondary",()=>{dialog.close();resumeConnection();}));
+      }
     } else {
-      const connection=cloud, info=el("p","context-box",connection.client.name), error=el("p","form-error",connection.error);
+      const connection=cloud, info=el("p",null,connection.client.name), error=el("p","form-error",connection.error);
       const actions=el("div","actions");
-      panel.append(info,error,actions);
+      panel.append(info);
+      if (resumeAvailable) panel.appendChild(el("p","muted small","Подключение сохранено в этом браузере."));
+      panel.append(error,actions);
       if (!connection.ready) {
         panel.insertBefore(el("p","muted","В репозитории пока нет backlog.json. Создайте файл из текущего учебного беклога."),error);
         const create=button("Сохранить учебный беклог на GitHub","primary",async()=>{
@@ -231,10 +298,12 @@
         actions.append(button("Синхронизировать","primary",()=>{ dialog.close(); sync(true); }),
           button("Скачать копию","secondary",()=>downloadBackup(slots.demo.data)));
       }
-      actions.appendChild(button("Отключить","secondary",()=>{
+      actions.appendChild(button("Отключить","secondary",async()=>{
         if (connection.busy) return;
-        connection.client.close(); cloud=null; clearTimeout(syncTimer);
-        cache(); cloudPanel();
+        try { await clearRemembered(); }
+        catch { error.textContent="Браузер не смог удалить сохранённый ключ. Попробуйте ещё раз.";return; }
+        connection.client.close();cloud=null;connectionMessage="";clearTimeout(syncTimer);
+        cache();cloudPanel();
       }));
     }
     restoreControl(panel);
@@ -257,26 +326,31 @@
       const key=model.deadlineGroup(step);
       if (groups[key]) groups[key].push({task,step});
     }));
-    const counts=el("div","counts");
+    const panel=el("section","panel"), counts=el("div","filters deadline-filters"), list=el("div","step-list");
+    counts.setAttribute("aria-label","Фильтр по сроку");
     Object.entries(deadlineNames).forEach(([key,[label,tone]])=>{
-      const tile=button("","metric "+tone,()=>{deadlineFilter=key;render();});
+      const tile=button("","filter "+tone,()=>{deadlineFilter=key;render();});
       tile.setAttribute("aria-pressed",String(deadlineFilter===key));
-      tile.append(el("strong",null,groups[key].length),el("span",null,label));
+      tile.append(el("span",null,label),el("span","filter-count",groups[key].length));
       counts.appendChild(tile);
     });
-    view.appendChild(counts);
-    const panel=el("section","panel"), bar=el("div","panel-head"), list=el("div","step-list");
-    bar.append(el("h2",null,deadlineNames[deadlineFilter][0]),el("span","muted small",stepCount(groups[deadlineFilter].length)));
     const rows=groups[deadlineFilter].slice().sort((a,b)=>a.step.due.localeCompare(b.step.due));
     if (!rows.length) list.appendChild(el("p","empty","В этой группе шагов нет."));
+    if (rows.length) {
+      const header=el("div","deadline deadline-head");
+      header.append(el("span"),el("span",null,"Шаг"),el("span",null,"Задача"),el("span",null,"Срок"));
+      list.appendChild(header);
+    }
     for (const {task,step} of rows) {
-      const row=el("div","deadline"), toggle=input("checkbox","Выполнить "+step.text), info=el("div","deadline-info");
+      const row=el("div","deadline"), toggle=input("checkbox","Выполнить "+step.text);
       toggle.onchange=()=>{step.done=true;step.completedOn=model.today();changed();render();notify("Шаг отмечен выполненным");};
-      info.append(el("p",null,step.text),button(task.code+" · "+task.title,"link-button small",()=>taskDialog(task.id)));
-      row.append(toggle,info,el("span","date-badge "+deadlineNames[deadlineFilter][1],step.due?model.dateLabel(step.due):"Без срока"));
+      const taskLink=button(task.title,"link-button deadline-task",()=>taskDialog(task.id));
+      taskLink.title=task.code+" · "+task.title;
+      row.append(toggle,el("p","deadline-step",step.text),taskLink,
+        el("span","date-badge deadline-date "+deadlineNames[deadlineFilter][1],step.due?model.dateLabel(step.due):"—"));
       list.appendChild(row);
     }
-    panel.append(bar,list);view.appendChild(panel);
+    panel.append(counts,list);view.appendChild(panel);
   }
   function table(labels,cls) {
     const grid=el("table","table "+cls), head=grid.createTHead().insertRow();
@@ -334,38 +408,62 @@
   function taskDialog(id) {
     const current=state().tasks.find(task=>task.id===id);
     if (!current) return;
-    const draft=model.copy(current), panel=el("div","form-grid"), steps=el("div"), error=el("p","form-error");
+    const draft=model.copy(current), panel=el("div","form-grid"), filters=el("div","filters task-filters"),
+      steps=el("div","task-steps"), error=el("p","form-error");
+    let filter="all";
     const result=getTextArea("Результат для руководства",draft.result);
     result.placeholder="Что проверили и какой результат получили";
     result.maxLength=12000;
-    const heading=el("h3",null,"Шаги задачи");
-    const renderSteps=()=>{
-      steps.replaceChildren();
-      draft.steps.forEach((step,i)=>{
-        const card=el("div","editor-card"), label="Шаг "+(i+1), text=getTextArea(label,step.text,2);
+    const renderSteps=(focusId)=>{
+      steps.replaceChildren();filters.replaceChildren();
+      const open=draft.steps.filter(step=>!step.done).length, done=draft.steps.length-open;
+      for (const [key,title,size] of [["all","Все",draft.steps.length],["open","Нужно выполнить",open],["done","Выполнено",done]]) {
+        const tab=button("","filter",()=>{filter=key;renderSteps();});
+        tab.setAttribute("aria-pressed",String(filter===key));tab.dataset.stepFilter=key;
+        tab.append(el("span",null,title),el("span","filter-count",size));
+        filters.appendChild(tab);
+      }
+      const renderStep=(step,i,group)=>{
+        const card=el("div","editor-card"+(step.done?" is-done":"")), label="Шаг "+(i+1), text=getTextArea(label,step.text,2);
         text.maxLength=4000; text.oninput=()=>{step.text=text.value;};
         const date=input("date","Срок "+label,step.due); date.onchange=()=>{step.due=date.value;step.review=false;review.hidden=true;};
         const checkbox=input("checkbox","Выполнено "+label); checkbox.checked=step.done;
-        checkbox.onchange=()=>{step.done=checkbox.checked;step.completedOn=step.done?model.today():"";};
+        checkbox.dataset.stepToggle=step.id;
+        checkbox.onchange=()=>{
+          step.done=checkbox.checked;step.completedOn=step.done?model.today():"";
+          renderSteps(step.id);
+        };
         const toggle=el("label","inline-field"); toggle.append(checkbox,document.createTextNode("Выполнено"));
         const due=el("label","inline-field"); due.append(document.createTextNode("Срок"),date);
         const controls=el("div","step-meta");
         controls.append(toggle,due,button("Удалить шаг","subtle",()=>{draft.steps.splice(i,1);renderSteps();}));
+        if (step.completedOn) controls.appendChild(el("span","muted small","Готово "+model.dateLabel(step.completedOn)));
         const review=el("p","small form-error","Год определён по дате файла. Проверьте срок."); review.hidden=!step.review;
-        card.append(text,controls,review);steps.appendChild(card);
-      });
-      if (!draft.steps.length) steps.appendChild(el("p","muted small","Шагов пока нет."));
+        card.append(text,controls,review);group.appendChild(card);
+      };
+      for (const [key,title,done] of [["open","Нужно выполнить",false],["done","Выполнено",true]]) {
+        if (filter!=="all" && filter!==key) continue;
+        const group=el("section","step-section");
+        if (filter==="all") group.appendChild(el("h3",null,title));
+        draft.steps.forEach((step,i)=>{ if (step.done===done) renderStep(step,i,group); });
+        if (!draft.steps.some(step=>step.done===done)) group.appendChild(el("p","muted small","Шагов пока нет."));
+        steps.appendChild(group);
+      }
+      if (focusId) {
+        const toggle=[...steps.querySelectorAll("input[data-step-toggle]")].find(node=>node.dataset.stepToggle===focusId);
+        (toggle ?? filters.querySelector('[aria-pressed="true"]'))?.focus();
+      }
     };
     const add=button("Добавить шаг","secondary",()=>{
       draft.steps.push({id:model.uid(),text:"",due:"",done:false,completedOn:"",review:false});
-      renderSteps(); steps.lastChild.querySelector("textarea").focus();
+      filter="open";renderSteps();steps.querySelector(".editor-card:last-child textarea")?.focus();
     });
     const bulk=el("details"), paste=getTextArea("Список шагов","",4);
     paste.placeholder="Вставьте список из итогов встречи. Укажите срок рядом с шагом, если он известен.";
     const append=button("Добавить из списка","secondary",()=>{
       const added=model.parseSteps(paste.value);
       if (!added.length) return;
-      draft.steps.push(...added);paste.value="";renderSteps();notify("Добавлено шагов: "+added.length);
+      draft.steps.push(...added);paste.value="";filter="all";renderSteps();notify("Добавлено шагов: "+added.length);
     });
     bulk.append(el("summary",null,"Вставить список шагов"),paste,append);
     const controls=el("div","actions");
@@ -382,7 +480,9 @@
       const text=el("p","muted preserve",current.plan);
       plan.append(el("summary",null,"План из Excel"),text);panel.appendChild(plan);
     }
-    panel.append(heading,steps,add,bulk,field("Результат для руководства",result),error,controls);
+    const stepActions=el("div","actions step-actions");
+    stepActions.append(add,bulk);
+    panel.append(filters,steps,stepActions,field("Результат для руководства",result),error,controls);
     openDialog(current.title,panel);renderSteps();
   }
   function reportView() {
@@ -475,5 +575,5 @@
     paintStatus();
   }
   window.addEventListener("hashchange",render);
-  restoreCache();render();
+  restoreCache();render();resumeConnection();
 })();
